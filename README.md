@@ -1,23 +1,16 @@
-# <your project's name>
+# Shoot your shot
 
-<!-- This README is the front door of your project: the gallery shows its first lines. -->
+test your skills and use a slingshot to control your volume
 
-## what it is
-
-<one or two sentences: what is your evil input?>
-
-## what input it collects
-
-<text? a volume? a phone number? brightness? a time? and how does it make that miserable?>
+but don't overshoot! that gets you nowhere
 
 ## screenshot
 
-<!-- drag a screenshot or a gif into this file on github.com to upload it -->
-![screenshot](screenshot.png)
+<img width="975" height="487" alt="image" src="https://github.com/user-attachments/assets/4abea792-f282-4d42-815b-9a85543f645d" />
 
 ## live
 
-https://<your-github-name>.github.io/<this-repo>/
+https://kriti28900-gif.github.io/evil-volume/
 
 ## how to run it
 
