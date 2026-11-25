@@ -10,37 +10,215 @@
   html, body { margin: 0; background: #292b47; color: #eceae3; font: 16px/1.5 ui-monospace, Menlo, Consolas, monospace; }
   #stage {
     width: 800px; height: 400px; overflow: hidden; position: relative;
-    display: grid; place-items: center; text-align: center;
     background: #23243d;
   }
-
-  /* ---- the example below: delete it and build your own ---- */
-  .vol { font-size: 64px; margin: 0; }
-  button { font: inherit; color: inherit; background: #3f4168; border: 0; border-radius: 6px; padding: .6rem 1.2rem; cursor: pointer; }
-  .hint { color: #8d8aa6; font-size: 14px; }
+  canvas { position: absolute; inset: 0; width: 800px; height: 400px; touch-action: none; }
+  .readout { position: absolute; left: 28px; top: 14px; pointer-events: none; }
+  .vol { font-size: 64px; margin: 0; line-height: 1.1; }
+  .hint { color: #8d8aa6; font-size: 14px; margin: 0; }
 </style>
 </head>
 <body>
 <div id="stage">
-  <!-- example evil input: volume you have to pump up by hand, and it leaks back down -->
-  <div>
+  <canvas id="field" role="img" aria-label="A slingshot on the left and a volume bar along the ground. Drag the ball back and let go to set the volume."></canvas>
+  <div class="readout">
     <p class="vol"><span id="vol">0</span>%</p>
-    <button id="pump">pump volume</button>
-    <p class="hint">it leaks. keep pumping.</p>
+    <p class="hint" id="hint" aria-live="polite">drag the ball back, then let go.</p>
   </div>
 </div>
 <script>
-  // the example: delete this too
-  let volume = 0;
   const out = document.getElementById('vol');
-  document.getElementById('pump').addEventListener('click', () => {
-    volume = Math.min(100, volume + 7);
-    out.textContent = Math.round(volume);
+  const hint = document.getElementById('hint');
+  const cv = document.getElementById('field');
+  const ctx = cv.getContext('2d');
+
+  // canvas setup (sharp on high-resolution screens)
+  const W = 800, H = 400, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // layout
+  const GROUND = 340;                    // the ground line, and the top of the volume bar
+  const BAR_H = 26;
+  const BX0 = 230, BX1 = 740;            // the bar: 0% at the left end, 100% at the right end
+  const ANCHOR = { x: 100, y: 268 };     // where the ball rests in the sling
+  const TIPS = [{ x: 86, y: 262 }, { x: 114, y: 262 }];
+  const BR = 9;                          // ball radius
+
+  // tuning
+  const G = 0.25;                        // gravity
+  const K = 0.16;                        // launch speed per pixel of pull
+  const MAXPULL = 90;                    // longest pull in pixels
+
+  const BALL = ['#ffd166', '#c9962a'];
+  const MISS = ['#f7a8b8', '#b36579'];
+
+  let vol = 0;                           // the current volume only changes on a good landing
+  let ball = { x: ANCHOR.x, y: ANCHOR.y, vx: 0, vy: 0 };
+  let state = 'ready';                   // ready | drag | flying | wait
+  let waitUntil = 0;
+  let spent = null;                      // the ball that just landed, fading away
+
+  // ---- pointer ----
+  function pt(e) {
+    const r = cv.getBoundingClientRect();          // works even when the page is scaled down
+    return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+  }
+  const nearBall = p => Math.hypot(p.x - ball.x, p.y - ball.y) <= 36;
+
+  cv.addEventListener('pointerdown', e => {
+    if (state !== 'ready') return;
+    const p = pt(e);
+    if (!nearBall(p)) return;
+    state = 'drag';
+    cv.setPointerCapture(e.pointerId);
+    pull(p);
   });
-  setInterval(() => {
-    volume = Math.max(0, volume - 1);
-    out.textContent = Math.round(volume);
-  }, 120);
+  cv.addEventListener('pointermove', e => {
+    const p = pt(e);
+    if (state === 'drag') pull(p);
+    else cv.style.cursor = state === 'ready' && nearBall(p) ? 'grab' : 'default';
+  });
+  cv.addEventListener('pointerup', release);
+  cv.addEventListener('pointercancel', release);
+
+  function pull(p) {
+    let dx = p.x - ANCHOR.x, dy = p.y - ANCHOR.y;
+    const d = Math.hypot(dx, dy);
+    if (d > MAXPULL) { dx *= MAXPULL / d; dy *= MAXPULL / d; }
+    ball.x = ANCHOR.x + dx;
+    ball.y = Math.min(ANCHOR.y + dy, GROUND - BR - 1);   // cannot drag the ball into the ground
+  }
+
+  function release() {
+    if (state !== 'drag') return;
+    const dx = ANCHOR.x - ball.x, dy = ANCHOR.y - ball.y;
+    if (Math.hypot(dx, dy) < 10) {                        // barely pulled: put it back
+      ball.x = ANCHOR.x; ball.y = ANCHOR.y; state = 'ready'; return;
+    }
+    ball.vx = dx * K; ball.vy = dy * K;
+    state = 'flying';
+    hint.textContent = 'airborne…';
+  }
+
+  // ---- flight ----
+  function stepFlight() {
+    const px = ball.x, py = ball.y;
+    ball.vy += G;
+    ball.x += ball.vx; ball.y += ball.vy;
+
+    if (ball.y + BR >= GROUND && ball.vy > 0) {           // touched the ground
+      const t = (GROUND - BR - py) / (ball.y - py);
+      land(px + (ball.x - px) * t);
+    } else if (ball.x > W + 60) {                         // flew off the right edge
+      land(ball.x);
+    } else if (ball.x < -60) {                            // flew off the left edge
+      land(ball.x);
+    }
+  }
+
+  function land(lx) {
+    const ok = lx >= BX0 && lx <= BX1;
+    if (ok) {
+      vol = Math.round((lx - BX0) / (BX1 - BX0) * 100);  // where it lands is the volume
+      out.textContent = vol;
+      hint.textContent = 'landed on ' + vol + '%.';
+    } else if (lx > BX1) {
+      hint.textContent = 'overshot. volume unchanged. shoot again.';
+    } else {
+      hint.textContent = 'too short. volume unchanged. shoot again.';
+    }
+    spent = (lx > -BR && lx < W + BR) ? { x: lx, y: GROUND - BR, alpha: 1, ok } : null;
+    state = 'wait';
+    waitUntil = performance.now() + 1000;
+  }
+
+  // ---- drawing ----
+  function drawBall(x, y, c) {
+    const g = ctx.createRadialGradient(x - BR * 0.35, y - BR * 0.35, BR * 0.1, x, y, BR);
+    g.addColorStop(0, '#ffffff');
+    g.addColorStop(0.2, c[0]);
+    g.addColorStop(1, c[1]);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, BR, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function paint() {
+    ctx.clearRect(0, 0, W, H);
+
+    // ground
+    ctx.strokeStyle = '#3f4168'; ctx.lineWidth = 2; ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.moveTo(0, GROUND); ctx.lineTo(W, GROUND); ctx.stroke();
+
+    // volume bar
+    ctx.fillStyle = '#2c2e52';
+    ctx.fillRect(BX0, GROUND, BX1 - BX0, BAR_H);
+    const fx = BX0 + (BX1 - BX0) * vol / 100;
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(BX0, GROUND, fx - BX0, BAR_H);
+
+    // pin showing the current volume
+    ctx.fillStyle = '#eceae3';
+    ctx.beginPath();
+    ctx.moveTo(fx, GROUND + BAR_H + 2);
+    ctx.lineTo(fx - 6, GROUND + BAR_H + 12);
+    ctx.lineTo(fx + 6, GROUND + BAR_H + 12);
+    ctx.closePath(); ctx.fill();
+
+    // labels
+    ctx.fillStyle = '#8d8aa6';
+    ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      ctx.fillText(i * 25, BX0 + (BX1 - BX0) * i / 4, 392);
+    }
+
+    // slingshot
+    ctx.strokeStyle = '#8d8aa6'; ctx.lineCap = 'round'; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(100, GROUND); ctx.lineTo(100, 298); ctx.stroke();
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(100, 302); ctx.lineTo(TIPS[0].x, TIPS[0].y);
+    ctx.moveTo(100, 302); ctx.lineTo(TIPS[1].x, TIPS[1].y);
+    ctx.stroke();
+
+    // rubber bands (slack when the ball is gone)
+    const loaded = state === 'ready' || state === 'drag';
+    const pouch = loaded ? ball : ANCHOR;
+    ctx.strokeStyle = '#ef8354'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(TIPS[0].x, TIPS[0].y); ctx.lineTo(pouch.x, pouch.y);
+    ctx.moveTo(TIPS[1].x, TIPS[1].y); ctx.lineTo(pouch.x, pouch.y);
+    ctx.stroke();
+
+    // the ball that just landed, fading out
+    if (spent) {
+      ctx.globalAlpha = Math.max(spent.alpha, 0);
+      drawBall(spent.x, spent.y, spent.ok ? BALL : MISS);
+      ctx.globalAlpha = 1;
+    }
+
+    // the ball in the sling or in the air
+    if (state !== 'wait') drawBall(ball.x, ball.y, BALL);
+  }
+
+  let last = 0, acc = 0;
+  function frame(now) {
+    const dt = Math.min(now - last || 16, 50); last = now;
+    acc += dt;
+    while (acc >= 16.67) {                                // fixed 60 steps per second
+      if (state === 'flying') stepFlight();
+      acc -= 16.67;
+    }
+    if (state === 'wait' && now >= waitUntil) {           // load a new ball
+      ball.x = ANCHOR.x; ball.y = ANCHOR.y; ball.vx = 0; ball.vy = 0;
+      state = 'ready';
+    }
+    if (spent) { spent.alpha -= 0.012; if (spent.alpha <= 0) spent = null; }
+    paint();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
 </script>
 </body>
 </html>
